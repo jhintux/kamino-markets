@@ -32,7 +32,7 @@ import {
   getWeb3Connection,
   loadSolsticeMarket,
 } from "./kamino";
-import { findRolloverSource, findRolloverSourceReserve, maxSafeWithdrawAmount } from "./rollover";
+import { findRolloverSource, findRolloverSourceReserve, maxSafeWithdrawAmount, nextRolloverStep } from "./rollover";
 import type { ActionKind, BuiltTransaction, RolloverResponse } from "./types";
 
 function toWeb3Instruction(ix: Instruction): TransactionInstruction {
@@ -266,8 +266,8 @@ export async function buildRollover(params: {
   amount?: string;
 }): Promise<RolloverResponse> {
   const [snapshot, marketView] = await Promise.all([
-    getObligationSnapshot(params.wallet),
-    getMarketSnapshot(),
+    getObligationSnapshot(params.wallet, true),
+    getMarketSnapshot(true),
   ]);
   if (!snapshot) {
     throw new Error("No Solstice obligation found for this wallet");
@@ -297,86 +297,29 @@ export async function buildRollover(params: {
   const sourceWallet = balances[sourceReserve.mint]?.amount ?? 0n;
   const destWallet = balances[destReserveView.mint]?.amount ?? 0n;
   const baseWallet = balances[baseMint]?.amount ?? 0n;
-  const sourceDecimals = sourceReserve.decimals || balances[sourceReserve.mint]?.decimals || 6;
+
+  const requestedWithdraw = params.amount
+    ? Number(params.amount)
+    : sourcePosition
+      ? maxSafeWithdrawAmount(snapshot, sourcePosition)
+      : 0;
+  const safeWithdraw = sourcePosition
+    ? Math.min(sourcePosition.amount, maxSafeWithdrawAmount(snapshot, sourcePosition), requestedWithdraw)
+    : 0;
 
   const meta = {
     sourceSymbol: sourceReserve.symbol,
     destSymbol: destReserveView.symbol,
   };
 
-  if (sourcePosition && sourcePosition.amount > 0) {
-    const requested = params.amount
-      ? Number(params.amount)
-      : maxSafeWithdrawAmount(snapshot, sourcePosition);
-    const safe = Math.min(sourcePosition.amount, maxSafeWithdrawAmount(snapshot, sourcePosition), requested);
-    if (safe <= 0) {
-      throw new Error(
-        `Withdrawing ${sourceReserve.symbol} would exceed max LTV. Repay some ${snapshot.borrows[0]?.symbol ?? "debt"} first, or roll a smaller slice after supplying new PT.`
-      );
-    }
-    const useMax = safe >= sourcePosition.amount * 0.999;
-    const transactions = await buildMarketAction({
-      wallet: params.wallet,
-      reserveAddress: sourcePosition.reserveAddress,
-      amount: String(safe),
-      action: "withdraw",
-      max: useMax,
-    });
-    return {
-      transactions,
-      step: "withdraw",
-      done: false,
-      ...meta,
-      message: `Withdraw ${sourceReserve.symbol} from Kamino`,
-    };
-  }
+  const step = nextRolloverStep({
+    hasDest: !isDust(destWallet),
+    hasBase: !isDust(baseWallet),
+    hasSourcePt: !isDust(sourceWallet),
+    canWithdraw: Boolean(sourcePosition && sourcePosition.amount > 0 && safeWithdraw > 0),
+  });
 
-  if (!isDust(sourceWallet)) {
-    const requested = params.amount
-      ? BigInt(uiAmountToLamports(params.amount, sourceDecimals).toString())
-      : sourceWallet;
-    const amountPt = requested < sourceWallet ? requested : sourceWallet;
-    const built = await buildRedeemMaturedPtIxs({
-      owner,
-      ptMint: sourceReserve.mint,
-      amountPt,
-    });
-    return {
-      transactions: await compileExponentBundle({
-        wallet: params.wallet,
-        ...built,
-      }),
-      step: "redeem",
-      done: false,
-      ...meta,
-      message: `Redeem matured ${sourceReserve.symbol} on Exponent`,
-    };
-  }
-
-  if (!isDust(baseWallet)) {
-    let amountBase = baseWallet;
-    if (params.amount) {
-      const cap = BigInt(uiAmountToLamports(params.amount, destReserveView.decimals).toString());
-      if (amountBase > cap) amountBase = cap;
-    }
-    const built = await buildConvertToNewPtIxs({
-      owner,
-      ptMint: destReserveView.mint,
-      amountBase,
-    });
-    return {
-      transactions: await compileExponentBundle({
-        wallet: params.wallet,
-        ...built,
-      }),
-      step: "convert",
-      done: false,
-      ...meta,
-      message: `Convert to ${destReserveView.symbol} on Exponent`,
-    };
-  }
-
-  if (!isDust(destWallet)) {
+  if (step === "supply") {
     const destDecimals = destReserveView.decimals || 6;
     const transactions = await buildMarketAction({
       wallet: params.wallet,
@@ -386,11 +329,71 @@ export async function buildRollover(params: {
     });
     return {
       transactions,
-      step: "supply",
+      step,
       done: false,
       ...meta,
       message: `Supply ${destReserveView.symbol} to Kamino`,
     };
+  }
+
+  if (step === "convert") {
+    const built = await buildConvertToNewPtIxs({
+      owner,
+      ptMint: destReserveView.mint,
+      amountBase: baseWallet,
+    });
+    return {
+      transactions: await compileExponentBundle({
+        wallet: params.wallet,
+        ...built,
+      }),
+      step,
+      done: false,
+      ...meta,
+      message: `Convert to ${destReserveView.symbol} on Exponent`,
+    };
+  }
+
+  if (step === "redeem") {
+    const built = await buildRedeemMaturedPtIxs({
+      owner,
+      ptMint: sourceReserve.mint,
+      amountPt: sourceWallet,
+    });
+    return {
+      transactions: await compileExponentBundle({
+        wallet: params.wallet,
+        ...built,
+      }),
+      step,
+      done: false,
+      ...meta,
+      message: `Redeem matured ${sourceReserve.symbol} on Exponent`,
+    };
+  }
+
+  if (step === "withdraw" && sourcePosition) {
+    const useMax = safeWithdraw >= sourcePosition.amount * 0.999;
+    const transactions = await buildMarketAction({
+      wallet: params.wallet,
+      reserveAddress: sourcePosition.reserveAddress,
+      amount: String(safeWithdraw),
+      action: "withdraw",
+      max: useMax,
+    });
+    return {
+      transactions,
+      step,
+      done: false,
+      ...meta,
+      message: `Withdraw ${sourceReserve.symbol} from Kamino`,
+    };
+  }
+
+  if (sourcePosition && sourcePosition.amount > 0) {
+    throw new Error(
+      `Withdrawing ${sourceReserve.symbol} would exceed max LTV. Repay some ${snapshot.borrows[0]?.symbol ?? "debt"} first, or roll a smaller slice after supplying new PT.`
+    );
   }
 
   return {

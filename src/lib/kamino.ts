@@ -146,8 +146,8 @@ function serializeReserve(reserve: Awaited<ReturnType<KaminoMarket["getReserves"
   };
 }
 
-export async function getMarketSnapshot(): Promise<MarketSnapshot> {
-  const market = await loadSolsticeMarket();
+export async function getMarketSnapshot(force = false): Promise<MarketSnapshot> {
+  const market = await loadSolsticeMarket(force);
   const instant = await getLedgerInstant();
   const reserves = market.getReserves().map((reserve) => serializeReserve(reserve, instant));
 
@@ -189,8 +189,8 @@ function mapPosition(
   };
 }
 
-export async function getObligationSnapshot(wallet: string): Promise<ObligationView | null> {
-  const market = await loadSolsticeMarket();
+export async function getObligationSnapshot(wallet: string, force = false): Promise<ObligationView | null> {
+  const market = await loadSolsticeMarket(force);
   const instant = await getLedgerInstant();
   const obligation = await market.getObligationByWallet(
     address(wallet),

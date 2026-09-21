@@ -110,7 +110,9 @@ export function ActionModal({
   async function submitRollover() {
     if (!publicKey) throw new Error("Connect a wallet first");
     let lastSig = "";
-    for (let step = 0; step < 8; step++) {
+    // Each LTV slice is withdraw → redeem → convert → supply. A large
+    // position against an open borrow can need several of those cycles.
+    for (let step = 0; step < 24; step++) {
       setStatus("Building next rollover transaction…");
       const response = await fetch("/api/action", {
         method: "POST",
@@ -134,6 +136,7 @@ export function ActionModal({
       }
       setStatus(data.message);
       lastSig = await signAndSend(data.transactions);
+      await new Promise((resolve) => setTimeout(resolve, 800));
     }
     throw new Error("Rollover did not finish after several steps. Refresh and try again.");
   }
@@ -207,7 +210,7 @@ export function ActionModal({
         {action === "rollover" && (
           <div className="mb-4 space-y-2 rounded-lg border border-teal-500/30 bg-teal-500/10 px-3 py-3 text-xs text-teal-100">
             <div>
-              Withdraw matured {rolloverSource?.symbol ?? "PT"}, redeem it on{" "}
+              Each cycle withdraws matured {rolloverSource?.symbol ?? "PT"}, redeems it on{" "}
               <a
                 href="https://docs.exponent.finance/developers/choosing-your-sdk"
                 target="_blank"
@@ -216,14 +219,14 @@ export function ActionModal({
               >
                 Exponent
               </a>
-              , convert into {reserve.symbol}, then supply it. Each step is a separate wallet signature.
+              , converts into {reserve.symbol}, then supplies it. If an open borrow caps the withdraw, that cycle repeats until the matured position is gone. Each step is a separate wallet signature.
             </div>
             {obligation && obligation.borrowedUsd > 0 && (
               <div className="text-amber-200">
                 Open borrow stays in place. Kamino lets you withdraw until max LTV
                 {rolloverSource && rolloverSource.ltv > 0 ? ` (${formatPct(rolloverSource.ltv, 0)})` : ""}
                 {safeRolloverMax < positionAmount
-                  ? `, so this rolls ${formatToken(safeRolloverMax)} of ${formatToken(positionAmount)}. Repeat after it supplies.`
+                  ? `, so the first slice is ${formatToken(safeRolloverMax)} of ${formatToken(positionAmount)}. After that slice is supplied, the next withdraw can run.`
                   : "."}
               </div>
             )}

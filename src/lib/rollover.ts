@@ -1,5 +1,5 @@
 import { isMatured, ptFamily } from "./format";
-import type { ObligationView, PositionView, ReserveView } from "./types";
+import type { ObligationView, PositionView, ReserveView, RolloverStep } from "./types";
 
 export function findRolloverSource(
   dest: Pick<ReserveView, "mint" | "symbol">,
@@ -32,6 +32,24 @@ export function findRolloverSourceReserve(
       isMatured(reserve.symbol)
   );
   return matches[0] ?? null;
+}
+
+/**
+ * Each LTV-capped slice must leave Kamino, convert, and come back as new PT
+ * before another withdraw is safe. Tokens already in the wallet always win
+ * over pulling more collateral.
+ */
+export function nextRolloverStep(state: {
+  hasDest: boolean;
+  hasBase: boolean;
+  hasSourcePt: boolean;
+  canWithdraw: boolean;
+}): RolloverStep | "done" {
+  if (state.hasDest) return "supply";
+  if (state.hasBase) return "convert";
+  if (state.hasSourcePt) return "redeem";
+  if (state.canWithdraw) return "withdraw";
+  return "done";
 }
 
 /**
