@@ -1,36 +1,23 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Solstice Market
 
-## Getting Started
+Next.js UI for the Kamino **Solstice Market** (`9Y7uwXgQ68mGqRtZfuFaP4hc4fxeJ7cE9zTtqTxVhfGU`).
 
-First, run the development server:
+It loads live reserve and obligation state with `@kamino-finance/klend-sdk`, including Hidden PT assets that are not shown in the official Kamino UI:
+
+- PT-eUSX-01DEC26 mint `CAuiv9V7HrgxbDTsC9qqvzrbpRM1pqr7he2nY8vFKNfz` (vault `2p9vrKpUzgx6JoaNje9B3bPTFtNZeGJGhrg9DgfYT6Fr`)
+- PT-USX-01DEC26 mint `FVS7CoMmdQRfby3ZrFwLDj236VCzGcd9tytZPxq5Q3rh` (vault `C3Kj9camyrAhTZmh9DzAjQpL47qT84jVFDgnnQnmPVY5`)
+
+## Setup
+
+```bash
+npm install
+cp .env.example .env.local
+```
+
+Optional: set `SOLANA_RPC_URL` (and `NEXT_PUBLIC_SOLANA_RPC_URL`) to a dedicated mainnet RPC if the public endpoint rate-limits.
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Open [http://localhost:3000](http://localhost:3000), connect Phantom or Solflare, and supply / withdraw / borrow / repay from your existing Solstice loan.
