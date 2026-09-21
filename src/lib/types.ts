@@ -35,6 +35,8 @@ export type PositionView = {
   amount: number;
   amountUsd: number;
   apy: number;
+  ltv: number;
+  maxWithdraw?: number;
   isNew: boolean;
 };
 
@@ -44,7 +46,10 @@ export type ObligationView = {
   netValueUsd: number;
   suppliedUsd: number;
   borrowedUsd: number;
+  borrowedAdjustedUsd: number;
+  borrowLimitUsd: number;
   ltv: number;
+  maxLtv: number;
   liquidationLtv: number;
   borrowUtilization: number;
   netApy: number;
@@ -64,10 +69,21 @@ export type MarketSnapshot = {
 
 export type WalletBalances = Record<string, { amount: number; mint: string }>;
 
-export type ActionKind = "supply" | "withdraw" | "borrow" | "repay";
+export type ActionKind = "supply" | "withdraw" | "borrow" | "repay" | "rollover";
+
+export type RolloverStep = "withdraw" | "redeem" | "convert" | "supply";
 
 export type BuiltTransaction = {
   transaction: string;
   lastValidBlockHeight: number;
   label: string;
+};
+
+export type RolloverResponse = {
+  transactions: BuiltTransaction[];
+  step: RolloverStep | "done";
+  done: boolean;
+  sourceSymbol?: string;
+  destSymbol?: string;
+  message: string;
 };

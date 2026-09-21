@@ -68,3 +68,9 @@ export function isMatured(symbol: string, now = new Date()): boolean {
   if (!date) return false;
   return date.getTime() < now.getTime();
 }
+
+/** `PT-eUSX-01DEC26` → `PT-EUSX`. Used to pair matured PTs with the next maturity. */
+export function ptFamily(symbol: string): string | null {
+  const match = symbol.match(/^(PT-[A-Za-z0-9]+)-/i);
+  return match ? match[1].toUpperCase() : null;
+}

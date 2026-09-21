@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { formatApy, formatPct, formatToken, formatUsd, isMatured, shortAddress } from "@/lib/format";
+import { findRolloverSource, findRolloverSourceReserve } from "@/lib/rollover";
 import type { ActionKind, MarketSnapshot, ObligationView, ReserveView, WalletBalances } from "@/lib/types";
 import { ActionModal } from "./ActionModal";
 import { HealthBar } from "./HealthBar";
@@ -226,11 +227,14 @@ function LoanView({
       value: obligation ? formatPct(obligation.ltv) : "—",
     },
     {
+      label: "Max LTV",
+      value: obligation ? formatPct(obligation.maxLtv) : "—",
+    },
+    {
       label: "Liq. LTV",
       value: obligation ? formatPct(obligation.liquidationLtv) : "—",
       tone: "text-orange-300",
     },
-    { label: "Liq. Price", value: "—" },
   ];
 
   return (
@@ -294,7 +298,15 @@ function LoanView({
             </div>
           </div>
           <div className="space-y-2">
-            {newReserves.map((reserve) => (
+            {newReserves.map((reserve) => {
+              const source = findRolloverSource(reserve, obligation?.deposits ?? []);
+              const sourceReserve = findRolloverSourceReserve(reserve, market.reserves);
+              const canRoll = Boolean(
+                source ||
+                  (sourceReserve && (balances[sourceReserve.mint]?.amount ?? 0) > 0) ||
+                  (balances[reserve.mint]?.amount ?? 0) > 0
+              );
+              return (
               <div key={reserve.address} className="flex items-center justify-between rounded-xl bg-white/5 px-3 py-3">
                 <div className="flex items-center gap-3">
                   <TokenIcon symbol={reserve.symbol} logoUrl={reserve.logoUrl} />
@@ -310,14 +322,29 @@ function LoanView({
                     </div>
                   </div>
                 </div>
-                <button
-                  onClick={() => onAction("supply", reserve)}
-                  className="rounded-lg bg-teal-400 px-3 py-1.5 text-sm font-semibold text-slate-900"
-                >
-                  Supply
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => onAction("rollover", reserve)}
+                    disabled={!canRoll}
+                    title={
+                      canRoll
+                        ? `Roll ${source?.symbol ?? sourceReserve?.symbol ?? "matured PT"} into ${reserve.symbol}`
+                        : "Supply a matured PT of the same family first"
+                    }
+                    className="rounded-lg border border-teal-400/40 px-3 py-1.5 text-sm font-semibold text-teal-200 disabled:opacity-40"
+                  >
+                    Roll Over
+                  </button>
+                  <button
+                    onClick={() => onAction("supply", reserve)}
+                    className="rounded-lg bg-teal-400 px-3 py-1.5 text-sm font-semibold text-slate-900"
+                  >
+                    Supply
+                  </button>
+                </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

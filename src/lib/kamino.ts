@@ -184,6 +184,7 @@ function mapPosition(
     amount,
     amountUsd: marketValue,
     apy: side === "supply" ? reserve.supplyApy : reserve.borrowApy,
+    ltv: reserve.ltv,
     isNew: reserve.isNew,
   };
 }
@@ -210,7 +211,16 @@ export async function getObligationSnapshot(wallet: string): Promise<ObligationV
       toNumber(deposit.marketValueRefreshed),
       "supply"
     );
-    if (mapped && mapped.amount > 0) deposits.push(mapped);
+    if (mapped && mapped.amount > 0) {
+      const reserve = reserveMap.get(String(deposit.reserveAddress));
+      try {
+        const max = obligation.getMaxWithdrawAmount(market, deposit.reserveAddress, instant);
+        mapped.maxWithdraw = toNumber(max.maxWithdrawAmount) / 10 ** (reserve?.decimals ?? 6);
+      } catch {
+        // Fall back to the max-LTV formula in maxSafeWithdrawAmount.
+      }
+      deposits.push(mapped);
+    }
   }
 
   const borrows: PositionView[] = [];
@@ -227,6 +237,9 @@ export async function getObligationSnapshot(wallet: string): Promise<ObligationV
 
   const suppliedUsd = toNumber(obligation.refreshedStats.userTotalDeposit);
   const borrowedUsd = toNumber(obligation.refreshedStats.userTotalBorrow);
+  const borrowedAdjustedUsd = toNumber(obligation.refreshedStats.userTotalBorrowBorrowFactorAdjusted);
+  const borrowLimitUsd = toNumber(obligation.refreshedStats.borrowLimit);
+  const collateralUsd = toNumber(obligation.refreshedStats.userTotalCollateralDeposit);
   const netValueUsd = toNumber(obligation.getNetAccountValue());
 
   const supplyYield = deposits.reduce((sum, pos) => sum + pos.amountUsd * pos.apy, 0);
@@ -239,7 +252,10 @@ export async function getObligationSnapshot(wallet: string): Promise<ObligationV
     netValueUsd,
     suppliedUsd,
     borrowedUsd,
+    borrowedAdjustedUsd,
+    borrowLimitUsd,
     ltv: toNumber(obligation.refreshedStats.loanToValue),
+    maxLtv: collateralUsd > 0 ? borrowLimitUsd / collateralUsd : 0,
     liquidationLtv: toNumber(obligation.refreshedStats.liquidationLtv),
     borrowUtilization: toNumber(obligation.refreshedStats.borrowUtilization),
     netApy,
@@ -273,6 +289,39 @@ export async function getWalletBalances(wallet: string, mints: string[]) {
 
   for (const mint of unique) {
     if (!result[mint]) result[mint] = { amount: 0, mint };
+  }
+
+  return result;
+}
+
+export async function getRawTokenBalances(wallet: string, mints: string[]) {
+  const connection = getWeb3Connection();
+  const owner = new PublicKey(wallet);
+  const unique = [...new Set(mints.filter(Boolean))];
+  const result: Record<string, { amount: bigint; decimals: number; mint: string }> = {};
+
+  const accounts = await connection.getParsedTokenAccountsByOwner(owner, {
+    programId: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
+  });
+
+  const token2022 = await connection.getParsedTokenAccountsByOwner(owner, {
+    programId: new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"),
+  });
+
+  for (const { account } of [...accounts.value, ...token2022.value]) {
+    const info = account.data.parsed?.info;
+    const mint = info?.mint as string | undefined;
+    if (!mint || (unique.length > 0 && !unique.includes(mint))) continue;
+    const tokenAmount = info?.tokenAmount;
+    result[mint] = {
+      amount: BigInt(tokenAmount?.amount ?? "0"),
+      decimals: Number(tokenAmount?.decimals ?? 0),
+      mint,
+    };
+  }
+
+  for (const mint of unique) {
+    if (!result[mint]) result[mint] = { amount: BigInt(0), decimals: 0, mint };
   }
 
   return result;

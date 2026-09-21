@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { buildMarketAction } from "@/lib/transactions";
+import { buildMarketAction, buildRollover } from "@/lib/transactions";
 import type { ActionKind } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-const ACTIONS = new Set<ActionKind>(["supply", "withdraw", "borrow", "repay"]);
+const ACTIONS = new Set<ActionKind>(["supply", "withdraw", "borrow", "repay", "rollover"]);
 
 export async function POST(request: NextRequest) {
   try {
@@ -18,6 +18,16 @@ export async function POST(request: NextRequest) {
     if (!wallet || !reserveAddress || !ACTIONS.has(action)) {
       return NextResponse.json({ error: "wallet, reserveAddress and action are required" }, { status: 400 });
     }
+
+    if (action === "rollover") {
+      const result = await buildRollover({
+        wallet,
+        reserveAddress,
+        amount: amount || undefined,
+      });
+      return NextResponse.json(result);
+    }
+
     if (!max && !amount) {
       return NextResponse.json({ error: "amount is required" }, { status: 400 });
     }

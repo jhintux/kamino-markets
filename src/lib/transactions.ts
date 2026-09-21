@@ -18,8 +18,22 @@ import {
 import BN from "bn.js";
 import Decimal from "decimal.js";
 import { MARKET_LOOKUP_TABLE, U64_MAX } from "./constants";
-import { getLedgerInstant, getWeb3Connection, loadSolsticeMarket } from "./kamino";
-import type { ActionKind, BuiltTransaction } from "./types";
+import {
+  buildConvertToNewPtIxs,
+  buildRedeemMaturedPtIxs,
+  isDust,
+  peekRolloverMints,
+} from "./exponent";
+import {
+  getLedgerInstant,
+  getMarketSnapshot,
+  getObligationSnapshot,
+  getRawTokenBalances,
+  getWeb3Connection,
+  loadSolsticeMarket,
+} from "./kamino";
+import { findRolloverSource, findRolloverSourceReserve, maxSafeWithdrawAmount } from "./rollover";
+import type { ActionKind, BuiltTransaction, RolloverResponse } from "./types";
 
 function toWeb3Instruction(ix: Instruction): TransactionInstruction {
   return new TransactionInstruction({
@@ -49,9 +63,9 @@ async function getLookupTables(addresses: string[]) {
   return accounts;
 }
 
-async function compileTx(
+async function compileWeb3Tx(
   payer: string,
-  instructions: Instruction[],
+  instructions: TransactionInstruction[],
   lookupTableAddresses: string[],
   label: string
 ): Promise<BuiltTransaction> {
@@ -70,7 +84,7 @@ async function compileTx(
   const message = new TransactionMessage({
     payerKey: new PublicKey(payer),
     recentBlockhash: blockhash,
-    instructions: instructions.map(toWeb3Instruction),
+    instructions,
   }).compileToV0Message(luts);
 
   const tx = new VersionedTransaction(message);
@@ -79,6 +93,43 @@ async function compileTx(
     lastValidBlockHeight,
     label,
   };
+}
+
+async function compileTx(
+  payer: string,
+  instructions: Instruction[],
+  lookupTableAddresses: string[],
+  label: string
+): Promise<BuiltTransaction> {
+  return compileWeb3Tx(
+    payer,
+    instructions.map(toWeb3Instruction),
+    lookupTableAddresses,
+    label
+  );
+}
+
+async function compileExponentBundle(params: {
+  wallet: string;
+  setupIxs: TransactionInstruction[];
+  ixs: TransactionInstruction[];
+  lookupTables: string[];
+  label: string;
+}): Promise<BuiltTransaction[]> {
+  const combinedIxs = [...params.setupIxs, ...params.ixs];
+  const combined = await compileWeb3Tx(
+    params.wallet,
+    combinedIxs,
+    params.lookupTables,
+    params.label
+  );
+  if (serializedSize(combined) <= MAX_TX_SIZE || params.setupIxs.length === 0) {
+    return [combined];
+  }
+  return [
+    await compileWeb3Tx(params.wallet, params.setupIxs, params.lookupTables, `Setup ${params.label}`),
+    await compileWeb3Tx(params.wallet, params.ixs, params.lookupTables, params.label),
+  ];
 }
 
 function uiAmountToLamports(amount: string, decimals: number, max?: boolean) {
@@ -198,4 +249,155 @@ export async function buildMarketAction(params: {
   );
 
   return transactions;
+}
+
+function uiFromRaw(amount: bigint, decimals: number) {
+  if (decimals <= 0) return amount.toString();
+  const factor = 10n ** BigInt(decimals);
+  const whole = amount / factor;
+  const frac = amount % factor;
+  if (frac === 0n) return whole.toString();
+  return `${whole}.${frac.toString().padStart(decimals, "0")}`.replace(/0+$/, "");
+}
+
+export async function buildRollover(params: {
+  wallet: string;
+  reserveAddress: string;
+  amount?: string;
+}): Promise<RolloverResponse> {
+  const [snapshot, marketView] = await Promise.all([
+    getObligationSnapshot(params.wallet),
+    getMarketSnapshot(),
+  ]);
+  if (!snapshot) {
+    throw new Error("No Solstice obligation found for this wallet");
+  }
+
+  const destReserveView = marketView.reserves.find((row) => row.address === params.reserveAddress);
+  if (!destReserveView) {
+    throw new Error("Destination reserve not found in Solstice Market");
+  }
+
+  const sourcePosition = findRolloverSource(destReserveView, snapshot.deposits);
+  const sourceReserve =
+    marketView.reserves.find((row) => row.address === sourcePosition?.reserveAddress) ||
+    findRolloverSourceReserve(destReserveView, marketView.reserves);
+  if (!sourceReserve) {
+    throw new Error(`No matured ${destReserveView.symbol.replace(/-\d.+$/, "")} reserve found to roll from`);
+  }
+
+  const { baseMint } = await peekRolloverMints(sourceReserve.mint, destReserveView.mint);
+  const owner = new PublicKey(params.wallet);
+  const balances = await getRawTokenBalances(params.wallet, [
+    sourceReserve.mint,
+    destReserveView.mint,
+    baseMint,
+  ]);
+
+  const sourceWallet = balances[sourceReserve.mint]?.amount ?? 0n;
+  const destWallet = balances[destReserveView.mint]?.amount ?? 0n;
+  const baseWallet = balances[baseMint]?.amount ?? 0n;
+  const sourceDecimals = sourceReserve.decimals || balances[sourceReserve.mint]?.decimals || 6;
+
+  const meta = {
+    sourceSymbol: sourceReserve.symbol,
+    destSymbol: destReserveView.symbol,
+  };
+
+  if (sourcePosition && sourcePosition.amount > 0) {
+    const requested = params.amount
+      ? Number(params.amount)
+      : maxSafeWithdrawAmount(snapshot, sourcePosition);
+    const safe = Math.min(sourcePosition.amount, maxSafeWithdrawAmount(snapshot, sourcePosition), requested);
+    if (safe <= 0) {
+      throw new Error(
+        `Withdrawing ${sourceReserve.symbol} would exceed max LTV. Repay some ${snapshot.borrows[0]?.symbol ?? "debt"} first, or roll a smaller slice after supplying new PT.`
+      );
+    }
+    const useMax = safe >= sourcePosition.amount * 0.999;
+    const transactions = await buildMarketAction({
+      wallet: params.wallet,
+      reserveAddress: sourcePosition.reserveAddress,
+      amount: String(safe),
+      action: "withdraw",
+      max: useMax,
+    });
+    return {
+      transactions,
+      step: "withdraw",
+      done: false,
+      ...meta,
+      message: `Withdraw ${sourceReserve.symbol} from Kamino`,
+    };
+  }
+
+  if (!isDust(sourceWallet)) {
+    const requested = params.amount
+      ? BigInt(uiAmountToLamports(params.amount, sourceDecimals).toString())
+      : sourceWallet;
+    const amountPt = requested < sourceWallet ? requested : sourceWallet;
+    const built = await buildRedeemMaturedPtIxs({
+      owner,
+      ptMint: sourceReserve.mint,
+      amountPt,
+    });
+    return {
+      transactions: await compileExponentBundle({
+        wallet: params.wallet,
+        ...built,
+      }),
+      step: "redeem",
+      done: false,
+      ...meta,
+      message: `Redeem matured ${sourceReserve.symbol} on Exponent`,
+    };
+  }
+
+  if (!isDust(baseWallet)) {
+    let amountBase = baseWallet;
+    if (params.amount) {
+      const cap = BigInt(uiAmountToLamports(params.amount, destReserveView.decimals).toString());
+      if (amountBase > cap) amountBase = cap;
+    }
+    const built = await buildConvertToNewPtIxs({
+      owner,
+      ptMint: destReserveView.mint,
+      amountBase,
+    });
+    return {
+      transactions: await compileExponentBundle({
+        wallet: params.wallet,
+        ...built,
+      }),
+      step: "convert",
+      done: false,
+      ...meta,
+      message: `Convert to ${destReserveView.symbol} on Exponent`,
+    };
+  }
+
+  if (!isDust(destWallet)) {
+    const destDecimals = destReserveView.decimals || 6;
+    const transactions = await buildMarketAction({
+      wallet: params.wallet,
+      reserveAddress: params.reserveAddress,
+      amount: uiFromRaw(destWallet, destDecimals),
+      action: "supply",
+    });
+    return {
+      transactions,
+      step: "supply",
+      done: false,
+      ...meta,
+      message: `Supply ${destReserveView.symbol} to Kamino`,
+    };
+  }
+
+  return {
+    transactions: [],
+    step: "done",
+    done: true,
+    ...meta,
+    message: `Rolled into ${destReserveView.symbol}`,
+  };
 }
