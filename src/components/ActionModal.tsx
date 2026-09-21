@@ -26,6 +26,7 @@ export function ActionModal({
   const { connection } = useConnection();
   const [amount, setAmount] = useState("");
   const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [signature, setSignature] = useState<string | null>(null);
 
@@ -53,6 +54,7 @@ export function ActionModal({
     setBusy(true);
     setError(null);
     setSignature(null);
+    setStatus(null);
 
     try {
       const response = await fetch("/api/action", {
@@ -69,15 +71,25 @@ export function ActionModal({
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Failed to build transaction");
 
+      const builtTxs = data.transactions as BuiltTransaction[];
       let lastSig = "";
-      for (const built of data.transactions as BuiltTransaction[]) {
+      for (let i = 0; i < builtTxs.length; i++) {
+        const built = builtTxs[i];
+        setStatus(
+          builtTxs.length > 1
+            ? `Sign ${i + 1} of ${builtTxs.length}: ${built.label}`
+            : "Confirm in wallet…"
+        );
         const tx = VersionedTransaction.deserialize(Buffer.from(built.transaction, "base64"));
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+        tx.message.recentBlockhash = blockhash;
+
         const signed = await signTransaction(tx);
         lastSig = await connection.sendRawTransaction(signed.serialize(), {
           skipPreflight: false,
         });
         await connection.confirmTransaction(
-          { signature: lastSig, blockhash: tx.message.recentBlockhash, lastValidBlockHeight: built.lastValidBlockHeight },
+          { signature: lastSig, blockhash, lastValidBlockHeight },
           "confirmed"
         );
       }
@@ -88,6 +100,7 @@ export function ActionModal({
       setError(err instanceof Error ? err.message : "Transaction failed");
     } finally {
       setBusy(false);
+      setStatus(null);
     }
   }
 
@@ -164,7 +177,7 @@ export function ActionModal({
           onClick={() => submit(false)}
           className="w-full rounded-xl bg-teal-400 py-2.5 text-sm font-semibold text-slate-900 disabled:opacity-50"
         >
-          {busy ? "Confirm in wallet…" : title}
+          {busy ? status || "Confirm in wallet…" : title}
         </button>
       </div>
     </div>

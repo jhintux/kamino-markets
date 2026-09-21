@@ -60,8 +60,13 @@ async function compileTx(
   }
 
   const connection = getWeb3Connection();
-  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("finalized");
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
   const luts = await getLookupTables([...lookupTableAddresses, MARKET_LOOKUP_TABLE]);
+  // v0 + ALTs is required here. Solana v1 txs are 4KB and drop lookup tables, but:
+  // - klend-sdk 12 hardcodes createTransactionMessage({ version: 0 }) and LUTs
+  // - @solana/kit 2.x / web3.js 1.x cannot build or send v1 (need kit 8 / web3.js 3)
+  // - wallet-adapter 0.9 cannot sign v1 (adapter 3.x is still unreleased)
+  // https://solana.com/docs/core/transactions/versioned-transactions
   const message = new TransactionMessage({
     payerKey: new PublicKey(payer),
     recentBlockhash: blockhash,
@@ -81,6 +86,32 @@ function uiAmountToLamports(amount: string, decimals: number, max?: boolean) {
   const lamports = new Decimal(amount || "0").mul(new Decimal(10).pow(decimals));
   if (lamports.lte(0)) throw new Error("Amount must be greater than 0");
   return new BN(lamports.toFixed(0));
+}
+
+const MAX_TX_SIZE = 1232;
+
+/** Account-init ixs can land in a prior slot. Refresh/elevation must share the lending tx. */
+function isDurableSetupLabel(label: string) {
+  return /^(createAtasIxs|CreateLiquidityUserAta|CreateUserAta\[|CreateCollateralUserAta|CreateAdditionalUserTokenAta|createUserLutIx|initUserMetadata|InitReferrerTokenState|InitObligation)/i.test(
+    label
+  );
+}
+
+function partitionSetupIxs(action: KaminoAction) {
+  const durable: Instruction[] = [];
+  const sameSlot: Instruction[] = [];
+
+  for (let i = 0; i < action.setupIxs.length; i++) {
+    const label = action.setupIxsLabels[i] ?? "";
+    if (isDurableSetupLabel(label)) durable.push(action.setupIxs[i]);
+    else sameSlot.push(action.setupIxs[i]);
+  }
+
+  return { durable, sameSlot };
+}
+
+function serializedSize(built: BuiltTransaction) {
+  return Buffer.from(built.transaction, "base64").length;
 }
 
 export async function buildMarketAction(params: {
@@ -130,22 +161,41 @@ export async function buildMarketAction(params: {
   }
 
   const lutAddresses = (action.luts ?? []).map((lut) => String(lut));
+  const allIxs = KaminoAction.actionToIxs(action);
+  const combined = await compileTx(params.wallet, allIxs, lutAddresses, params.action);
+
+  if (serializedSize(combined) <= MAX_TX_SIZE) {
+    return [combined];
+  }
+
+  const { durable, sameSlot } = partitionSetupIxs(action);
   const transactions: BuiltTransaction[] = [];
 
-  if (action.setupIxs?.length) {
+  if (durable.length) {
     transactions.push(
-      await compileTx(params.wallet, action.setupIxs, lutAddresses, "Setup accounts")
+      await compileTx(
+        params.wallet,
+        [...(action.computeBudgetIxs ?? []), ...durable],
+        lutAddresses,
+        "Setup accounts"
+      )
     );
   }
 
-  const mainIxs = [
-    ...(action.computeBudgetIxs ?? []),
-    ...(action.inBetweenIxs ?? []),
-    ...(action.lendingIxs ?? []),
-    ...(action.postLendingIxs ?? []),
-    ...(action.cleanupIxs ?? []),
-  ];
+  transactions.push(
+    await compileTx(
+      params.wallet,
+      [
+        ...(action.computeBudgetIxs ?? []),
+        ...sameSlot,
+        ...KaminoAction.actionToLendingIxs(action),
+        ...(action.postLendingIxs ?? []),
+        ...(action.cleanupIxs ?? []),
+      ],
+      lutAddresses,
+      params.action
+    )
+  );
 
-  transactions.push(await compileTx(params.wallet, mainIxs, lutAddresses, params.action));
   return transactions;
 }
