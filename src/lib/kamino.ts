@@ -31,6 +31,31 @@ export function getWeb3Connection() {
   return new Connection(getRpcUrl(), "confirmed");
 }
 
+function isMissingBlockError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("Block not available") ||
+    message.includes("Block time not found") ||
+    message.includes("#-32004")
+  );
+}
+
+/** Helius often returns -32004 when getSlot races a skipped/unindexed slot. */
+export async function getLedgerInstant() {
+  const rpc = getKitRpc();
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      return await getCurrentLedgerInstant(rpc, "confirmed");
+    } catch (error) {
+      lastError = error;
+      if (!isMissingBlockError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 120 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
 let marketPromise: Promise<KaminoMarket> | null = null;
 let marketLoadedAt = 0;
 const MARKET_TTL_MS = 20_000;
@@ -123,7 +148,7 @@ function serializeReserve(reserve: Awaited<ReturnType<KaminoMarket["getReserves"
 
 export async function getMarketSnapshot(): Promise<MarketSnapshot> {
   const market = await loadSolsticeMarket();
-  const instant = await getCurrentLedgerInstant(getKitRpc());
+  const instant = await getLedgerInstant();
   const reserves = market.getReserves().map((reserve) => serializeReserve(reserve, instant));
 
   reserves.sort((a, b) => {
@@ -165,7 +190,7 @@ function mapPosition(
 
 export async function getObligationSnapshot(wallet: string): Promise<ObligationView | null> {
   const market = await loadSolsticeMarket();
-  const instant = await getCurrentLedgerInstant(getKitRpc());
+  const instant = await getLedgerInstant();
   const obligation = await market.getObligationByWallet(
     address(wallet),
     new VanillaObligation(PROGRAM_ID)

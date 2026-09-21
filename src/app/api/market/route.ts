@@ -12,7 +12,7 @@ export async function GET() {
     return NextResponse.json(
       {
         error: message,
-        hint: "Public Solana RPCs often rate-limit reserve scans. Set SOLANA_RPC_URL to a dedicated endpoint.",
+        hint: "The RPC rejected this request. Check SOLANA_RPC_URL and retry; skipped slots on Helius can 500 once, then succeed.",
       },
       { status: 500 }
     );

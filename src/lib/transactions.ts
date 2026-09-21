@@ -4,7 +4,6 @@ import {
   type Instruction,
 } from "@solana/kit";
 import {
-  getCurrentLedgerInstant,
   KaminoAction,
   PROGRAM_ID,
   VanillaObligation,
@@ -19,7 +18,7 @@ import {
 import BN from "bn.js";
 import Decimal from "decimal.js";
 import { MARKET_LOOKUP_TABLE, U64_MAX } from "./constants";
-import { getKitRpc, getWeb3Connection, loadSolsticeMarket } from "./kamino";
+import { getLedgerInstant, getWeb3Connection, loadSolsticeMarket } from "./kamino";
 import type { ActionKind, BuiltTransaction } from "./types";
 
 function toWeb3Instruction(ix: Instruction): TransactionInstruction {
@@ -97,7 +96,7 @@ export async function buildMarketAction(params: {
     throw new Error("Reserve not found in Solstice Market");
   }
 
-  const instant = await getCurrentLedgerInstant(getKitRpc());
+  const instant = await getLedgerInstant();
   const owner = createNoopSigner(address(params.wallet));
   const obligation = new VanillaObligation(PROGRAM_ID);
   const amount = uiAmountToLamports(params.amount, reserve.getMintDecimals(), params.max);
